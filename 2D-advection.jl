@@ -2,8 +2,11 @@
 # 2D Advection - Explicit upwind scheme (flux in x)
 # =========================================================
 
-using Printf
+import Pkg
+Pkg.add("Plots")
+
 using Plots
+using Printf
 
 
 # Add ghost cells for periodic boundary conditions
