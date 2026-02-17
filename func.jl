@@ -1,6 +1,6 @@
 using LinearAlgebra, SparseArrays
 
-function gaussSeidel(A, b, x; tol=1e-5, maxiter=10000)
+function gaussSeidel(A, b, x; tol=1e-4, maxiter=10000)
     A = float.(A); b = float.(b); x = float.(x)
     n = size(A, 1)
     for k in 1:maxiter
@@ -17,7 +17,7 @@ function gaussSeidel(A, b, x; tol=1e-5, maxiter=10000)
     error("Pas de convergence après $maxiter itérations")
 end
 
-# Laplacien 2D correct : (nx*ny) × (nx*ny) avec stencil 5 points
+# Laplacien 2D correct : (nx*ny) × (nx*ny)
 function laplacian2D(nx, ny)
     N  = nx * ny
     A  = spzeros(N, N)
@@ -34,16 +34,10 @@ function laplacian2D(nx, ny)
 end
 
 # -------------------------------------------------------
-# Conditions aux bords pour grille staggered
+# Conditions aux bords pour grille
 #
 #  u : (nx+1, ny)   — composante x sur faces verticales
-#     indices i=1 (mur gauche) et i=nx+1 (mur droit)
-#     indice  j=1..ny (intérieur vertical)
-#     Le lid (j=ny) impose u=1 sur toutes les faces hautes
-#
 #  v : (nx, ny+1)   — composante y sur faces horizontales
-#     indices j=1 (bas) et j=ny+1 (haut)
-#     indice  i=1..nx
 # -------------------------------------------------------
 function condition_bord!(u, v)
     # u : murs gauche et droit → u=0
@@ -63,7 +57,7 @@ function condition_bord!(u, v)
 end
 
 # -------------------------------------------------------
-# Divergence discrète sur grille staggered (flux nets)
+# Divergence discrète sur grille (flux nets)
 # -------------------------------------------------------
 function divergence(u, v, i, j, dx, dy)
     (u[i+1,j] - u[i,j]) / dx + (v[i,j+1] - v[i,j]) / dy
@@ -137,4 +131,53 @@ function gradp_v(p, dy)
         g[i,j] = (p[i,j] - p[i,j-1]) / dy
     end
     return g
+end
+
+# Constructeur pour le gif
+
+function gif_maker(uc, vc, p, xs, ys, dx, dy, n, nt)
+    nx, ny = size(uc)
+    speed  = sqrt.(uc.^2 .+ vc.^2)
+
+    # Sous-échantillonnage pour les flèches
+    step = 2
+    xi = 1:step:nx
+    yj = 1:step:ny
+    Xg = [xs[i] for i in xi, j in yj]
+    Yg = [ys[j] for i in xi, j in yj]
+    sp = speed[xi, yj] .+ 1e-10
+    Un = uc[xi, yj] ./ sp .* dx .* step .* 0.5
+    Vn = vc[xi, yj] ./ sp .* dy .* step .* 0.5
+
+    pquiver = heatmap(xs, ys, speed',
+        color=:RdBu, clims=(0, 1),
+        aspect_ratio=1,
+        title="Champ de vitesse (norme)",
+        xlabel="x", ylabel="y",
+        colorbar_title="‖u‖",
+        size=(600, 550))
+    quiver!(pquiver, vec(Xg), vec(Yg),
+        quiver=(vec(Un), vec(Vn)),
+        arrow=true, color=:white, linewidth=0.7)
+
+    # Recentrer u et v aux centres des cellules
+    speed = sqrt.(uc.^2 .+ vc.^2)
+
+    # Grille centres de cellules
+    xs = ((1:nx) .- 0.5) .* dx
+    ys = ((1:ny) .- 0.5) .* dy
+
+    p1 = heatmap(xs, ys, uc',
+        title="u (vitesse horizontale)", xlabel="x", ylabel="y",
+        aspect_ratio=1, color=:RdBu)
+
+    p2 = heatmap(xs, ys, vc',
+        title="v (vitesse verticale)", xlabel="x", ylabel="y",
+        aspect_ratio=1, color=:RdBu)
+
+    p3 = heatmap(xs, ys, p',
+        title="p (pression)", xlabel="x", ylabel="y",
+        aspect_ratio=1, color=:viridis)
+
+    return plot(p1, p2, p3, pquiver, layout=(2,2), size=(1000,900))
 end
