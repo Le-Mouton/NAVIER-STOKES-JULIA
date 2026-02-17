@@ -1,84 +1,154 @@
 using LinearAlgebra
-include("func.jl")
 using SparseArrays
 using Plots
 
+function gaussSeidel(A, b, x; tol=1e-5, maxiter=10000)
+    A = float.(A)
+    b = float.(b)
+    x = float.(x)
+    n = size(A,1)
 
-function main()
-    nx, ny = 32, 32
-    dx, dy = 1, 1
-    rho = 1.2
-    dt = 0.005
-    nu = 0.05
-    nt = 100
+    for k in 1:maxiter
+        x_old = copy(x)
 
-    u = zeros(nx+1, ny)
-    v = zeros(nx, ny+1)
-    p = zeros(nx, ny)
-
-    b = zeros(nx, ny)
-
-    A_p = laplacian2D(nx, ny, dx, dy)
-
-    for n in 1:nt
-        Fc_u = flux_conv(u, v, dx)
-        Fc_v = flux_conv(v, u, dy)
-
-        Fd_u = flux_diff(nu, u, dx, dy)
-        Fd_v = flux_diff(nu, v, dx, dy)
-
-        u_star = u .+ dt .* (Fd_u .- Fc_u)
-        v_star = v .+ dt .* (Fd_v .- Fc_v)
-
-        condition_bord(u_star, v_star, p)
-
-        b .= 0
-        for i in 2:nx-1, j in 2:ny-1
-            b[i,j] = (rho/dt) * divergence(u_star, v_star, i, j, dx, dy)
+        for i in 1:n
+            σ = 0.0
+            for j in 1:n
+                if j != i
+                    σ += A[i,j] * x[j]
+                end
+            end
+            x[i] = (b[i] - σ) / A[i,i]
         end
 
-        p_vec = gaussSeidel(A_p, vec(b), vec(p); tol=1e-6, maxiter=1000)
-        p .= reshape(p_vec, nx, ny)
-
-        u .= u_star .- (dt/rho) .* gradp_u(p, dx)
-        v .= v_star .- (dt/rho) .* gradp_v(p, dy)
+        if norm(x - x_old, Inf) < tol
+            return x
+        end
     end
-
-    return u, v, p
+    error("Pas de convergence")
 end
 
-u, v, p = main()
+function laplacian(A, i, j, dx, dy)
+    (A[i+1,j] - 2A[i,j] + A[i-1,j])/(dx^2) + (A[i,j+1] - 2A[i,j] + A[i,j-1])/(dy^2)
+end
 
-using Plots
+function laplacian2D(nx, ny, dx, dy)
+    N = nx*ny
+    A = spzeros(Float64, N, N)
 
-nx, ny = 32, 32
-# --- 1) heatmaps
-p1 = heatmap(u', title="u (staggered)", aspect_ratio=1)
-p2 = heatmap(v', title="v (staggered)", aspect_ratio=1)
-p3 = heatmap(p', title="p (cell centers)", aspect_ratio=1)
+    ax = 1/dx^2
+    ay = 1/dy^2
+    c  = -2ax - 2ay
 
-# --- 2) recentrer u,v au centre cellule pour avoir même taille (nx, ny)
-uc = 0.5 .* (u[1:end-1,:] .+ u[2:end,:])     # (nx, ny)
-vc = 0.5 .* (v[:,1:end-1] .+ v[:,2:end])     # (nx, ny)
+    idx(i,j) = i + (j-1)*nx
 
-# 2) option: normaliser pour voir juste les directions (champ directionnel)
-speed = sqrt.(uc.^2 .+ vc.^2) .+ 1e-12
-u_dir = uc ./ speed
-v_dir = vc ./ speed
+    for j in 1:ny, i in 1:nx
+        k = idx(i,j)
 
-# grille complète des centres de cellules
-X = repeat(collect(1:nx), 1, ny)      # nx×ny
-Y = repeat(collect(1:ny)', nx, 1)     # nx×ny
+        if i==1 || i==nx || j==1 || j==ny
+            A[k,k] = 1.0
+        else
+            A[k,k] = c
+            A[k, idx(i-1,j)] = ax
+            A[k, idx(i+1,j)] = ax
+            A[k, idx(i,j-1)] = ay
+            A[k, idx(i,j+1)] = ay
+        end
+    end
 
-# champ vectoriel : 1 flèche par point
-pvec = quiver(
-    vec(X), vec(Y),
-    quiver=(vec(u_dir), vec(v_dir)),
-    aspect_ratio=1,
-    title="Champ vectoriel vitesse",
-    xlabel="x", ylabel="y",
-    size=(750,750)
-)
+    return A
+end
 
-# --- 4) afficher tout ensemble
-plot(p1, p2, p3, pvec, layout=(2,2), size=(900,900))
+function ddx(A, i, j, dx)
+    (A[i+1,j] - A[i-1,j])/(2dx)
+end
+
+function ddy(A, i, j, dy)
+    (A[i,j+1] - A[i,j-1])/(2dy)
+end
+
+function divergence(u, v, i, j, dx, dy)
+    ddx(u, i, j, dx) + ddy(v, i, j, dy)
+end
+
+function maillage(u, v, p)
+    nx, ny = size(u)
+
+    # vitesses: bords à 0 (no-slip partout)
+    u[1,:] .= 0; u[end,:] .= 0; u[:,1] .= 0; u[:,end] .= 0
+    v[1,:] .= 0; v[end,:] .= 0; v[:,1] .= 0; v[:,end] .= 0
+
+    # pression: Neumann dp/dn=0
+    p[1,:]   .= p[2,:]
+    p[end,:] .= p[end-1,:]
+    p[:,1]   .= p[:,2]
+    p[:,end] .= p[:,end-1]
+end
+
+# step "évolutif" : on passe ustar/vstar et A, et on modifie u/v/p en place
+function step(u, v, ustar, vstar, p, A, rho, nu, dt, dx, dy)
+    nx, ny = size(u)
+
+    ustar .= u
+    vstar .= v
+
+    # Prediction
+    for i in 2:nx-1, j in 2:ny-1
+        adv_u = u[i,j]*ddx(u,i,j,dx) + v[i,j]*ddy(u,i,j,dy)
+        adv_v = u[i,j]*ddx(v,i,j,dx) + v[i,j]*ddy(v,i,j,dy)
+
+        ustar[i,j] = u[i,j] + dt * (-adv_u + nu*laplacian(u,i,j,dx,dy))
+        vstar[i,j] = v[i,j] + dt * (-adv_v + nu*laplacian(v,i,j,dx,dy))
+    end
+
+    maillage(ustar, vstar, p)
+
+    rhs = zeros(nx, ny)
+    for i in 2:nx-1, j in 2:ny-1
+        rhs[i,j] = (rho/dt) * divergence(ustar, vstar, i, j, dx, dy)
+    end
+
+    # Résoudre Poisson via ton GS matriciel
+    p_vec = gaussSeidel(A, vec(rhs), vec(p); tol=1e-6, maxiter=500)
+    p .= reshape(p_vec, nx, ny)
+
+    maillage(ustar, vstar, p)
+
+    # Correction
+    for i in 2:nx-1, j in 2:ny-1
+        u[i,j] = ustar[i,j] - (dt/rho) * ddx(p,i,j,dx)
+        v[i,j] = vstar[i,j] - (dt/rho) * ddy(p,i,j,dy)
+    end
+
+    maillage(u, v, p)
+end
+
+nx, ny = 64, 64
+Lx, Ly = .5, .5
+dx, dy = Lx/(nx-1), Ly/(ny-1)
+
+rho = 1.0
+dt = 0.01
+
+ustar = zeros(nx, ny)
+vstar = zeros(nx, ny)
+
+for j in 1:ny, i in 1:nx
+    ustar[i,j] = sin(pi*i/nx)
+end
+
+rhs = divergence_rhs(ustar, vstar, rho, dt, dx, dy)
+
+A = laplacian2D(nx, ny, dx, dy)
+b = vec(rhs)
+x0 = zeros(nx*ny)
+
+p_vec = gaussSeidel(A, b, x0; tol=1e-5, maxiter=2000)
+p = reshape(p_vec, nx, ny)
+println(p[16,16])
+
+x = range(0, Lx, length=nx)
+y = range(0, Ly, length=ny)
+
+cont = contourf(x, y, p', levels=20, xlabel="x", ylabel="y", c=:viridis)
+savefig(cont, "contourf.png")
