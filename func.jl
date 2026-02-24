@@ -24,9 +24,9 @@ function gaussEidel(At::SparseMatrixCSC{T,Int}, b::AbstractVector, x::AbstractVe
                 end
             end
             !found_diag || aii == 0 && error("SOR: diagonale nulle/manquante à i=$i")
-            x_new  = (1-ω)*x[i] + ω*(b[i] - sigma)/aii
-            δmax   = max(δmax, abs(x_new - x[i]))   # critère sans allocation
-            x[i]   = x_new
+            x_new = (1-ω)*x[i] + ω*(b[i] - sigma)/aii
+            δmax  = max(δmax, abs(x_new - x[i]))
+            x[i]  = x_new
         end
         δmax < tol && return x, k
     end
@@ -42,164 +42,115 @@ function laplacian2D(nx, ny, dx, dy)
 
     for j in 1:ny, i in 1:nx
         k = id(i, j)
-
         if i == 1 && j == 1
             A[k, k] = 1.0
             continue
         end
-
         diag = 0.0
-
-        if i > 1
-            A[k, id(i-1, j)] += 1.0 / dx^2
-            diag -= 1.0 / dx^2
-        end
-
-        if i < nx
-            A[k, id(i+1, j)] += 1.0 / dx^2
-            diag -= 1.0 / dx^2
-        end
-
-        if j > 1
-            A[k, id(i, j-1)] += 1.0 / dy^2
-            diag -= 1.0 / dy^2
-        end
-
-        if j < ny
-            A[k, id(i, j+1)] += 1.0 / dy^2
-            diag -= 1.0 / dy^2
-        end
-
+        if i > 1;  A[k, id(i-1,j)] += 1/dx^2; diag -= 1/dx^2; end
+        if i < nx; A[k, id(i+1,j)] += 1/dx^2; diag -= 1/dx^2; end
+        if j > 1;  A[k, id(i,j-1)] += 1/dy^2; diag -= 1/dy^2; end
+        if j < ny; A[k, id(i,j+1)] += 1/dy^2; diag -= 1/dy^2; end
         A[k, k] = diag
     end
     return A
 end
 
-
 function condition_bord!(u, v, U0=5.0)
-    # Tout à zéro
     u[1,:]   .= 0.0; u[end,:] .= 0.0
-    u[:,1]   .= U0; u[:,end] .= 0.0
+    u[:,1]   .= U0;  u[:,end] .= 0.0
     v[:,1]   .= 0.0; v[:,end] .= 0.0
     v[1,:]   .= 0.0; v[end,:] .= 0.0
 end
 
-function divergence(u, v, i, j, dx, dy)
+@inline function divergence(u, v, i, j, dx, dy)
     (u[i+1, j] - u[i, j]) / dx + (v[i, j+1] - v[i, j]) / dy
 end
 
-function flux_diff(nu, phi, dx, dy)
+# ── Versions in-place (zéro allocation) ──────────────────────────────────
+
+function flux_diff!(F, nu, phi, dx, dy)
     nx, ny = size(phi)
-    F = zeros(nx, ny)
-    for j in 2:ny-1, i in 2:nx-1
-        F[i, j] = nu * (
-            (phi[i+1, j] - 2*phi[i, j] + phi[i-1, j]) / dx^2 +
-            (phi[i, j+1] - 2*phi[i, j] + phi[i, j-1]) / dy^2
+    idx2 = 1/dx^2; idy2 = 1/dy^2
+    @inbounds for j in 2:ny-1, i in 2:nx-1
+        F[i,j] = nu * (
+            (phi[i+1,j] - 2phi[i,j] + phi[i-1,j]) * idx2 +
+            (phi[i,j+1] - 2phi[i,j] + phi[i,j-1]) * idy2
         )
     end
-    return F
 end
 
-function flux_conv_u(u, v, dx, dy)
+function flux_conv_u!(F, u, v, dx, dy)
     nx1, ny = size(u)
-    F = zeros(nx1, ny)
-
-    for j in 2:ny-1, i in 2:nx1-1
-
-        u_right = i < nx1   ? (u[i, j] + u[i+1, j]) / 2 : 0.0
-        u_left  = i > 1     ? (u[i-1, j] + u[i, j]) / 2 : 0.0
-
-        il = max(i-1, 1); ir = min(i, nx1-1)
-        v_top = (v[il, j+1] + v[ir, j+1]) / 2
-        v_bot = (v[il, j]   + v[ir, j])   / 2
-
-        u_adv_right = u_right >= 0 ? u[i, j]     : (i < nx1 ? u[i+1, j] : u[i, j])
-        u_adv_left  = u_left  >= 0 ? (i > 1 ? u[i-1, j] : u[i, j]) : u[i, j]
-        u_adv_top   = v_top   >= 0 ? u[i, j]     : (j < ny ? u[i, j+1] : u[i, j])
-        u_adv_bot   = v_bot   >= 0 ? (j > 1 ? u[i, j-1] : u[i, j]) : u[i, j]
-
-        F[i, j] = (u_right * u_adv_right - u_left * u_adv_left) / dx +
-                  (v_top   * u_adv_top   - v_bot  * u_adv_bot)  / dy
+    idx = 1/dx; idy = 1/dy
+    @inbounds for j in 2:ny-1, i in 2:nx1-1
+        u_right = i < nx1 ? (u[i,j] + u[i+1,j]) * 0.5 : 0.0
+        u_left  = i > 1   ? (u[i-1,j] + u[i,j]) * 0.5 : 0.0
+        il = max(i-1,1); ir = min(i,nx1-1)
+        v_top = (v[il,j+1] + v[ir,j+1]) * 0.5
+        v_bot = (v[il,j]   + v[ir,j])   * 0.5
+        ua_r = u_right >= 0 ? u[i,j] : (i < nx1 ? u[i+1,j] : u[i,j])
+        ua_l = u_left  >= 0 ? (i > 1 ? u[i-1,j] : u[i,j]) : u[i,j]
+        ua_t = v_top   >= 0 ? u[i,j] : (j < ny  ? u[i,j+1] : u[i,j])
+        ua_b = v_bot   >= 0 ? (j > 1 ? u[i,j-1] : u[i,j]) : u[i,j]
+        F[i,j] = (u_right*ua_r - u_left*ua_l)*idx + (v_top*ua_t - v_bot*ua_b)*idy
     end
-    return F
 end
 
-function flux_conv_v(u, v, dx, dy)
+function flux_conv_v!(F, u, v, dx, dy)
     nx, ny1 = size(v)
-    F = zeros(nx, ny1)
-
-    for j in 2:ny1-1, i in 2:nx-1
-        v_top   = j < ny1   ? (v[i, j] + v[i, j+1]) / 2 : 0.0
-        v_bot   = j > 1     ? (v[i, j-1] + v[i, j]) / 2 : 0.0
-
-        jb = max(j-1, 1); jt = min(j, ny1-1)
-        u_right = (u[i+1, jb] + u[i+1, jt]) / 2
-        u_left  = (u[i,   jb] + u[i,   jt]) / 2
-
-        v_adv_top   = v_top   >= 0 ? v[i, j]     : (j < ny1 ? v[i, j+1] : v[i, j])
-        v_adv_bot   = v_bot   >= 0 ? (j > 1 ? v[i, j-1] : v[i, j]) : v[i, j]
-        v_adv_right = u_right >= 0 ? v[i, j]     : (i < nx ? v[i+1, j] : v[i, j])
-        v_adv_left  = u_left  >= 0 ? (i > 1 ? v[i-1, j] : v[i, j]) : v[i, j]
-
-        F[i, j] = (u_right * v_adv_right - u_left * v_adv_left) / dx +
-                  (v_top   * v_adv_top   - v_bot  * v_adv_bot)  / dy
+    idx = 1/dx; idy = 1/dy
+    @inbounds for j in 2:ny1-1, i in 2:nx-1
+        v_top = j < ny1 ? (v[i,j] + v[i,j+1]) * 0.5 : 0.0
+        v_bot = j > 1   ? (v[i,j-1] + v[i,j]) * 0.5 : 0.0
+        jb = max(j-1,1); jt = min(j,ny1-1)
+        u_right = (u[i+1,jb] + u[i+1,jt]) * 0.5
+        u_left  = (u[i,  jb] + u[i,  jt]) * 0.5
+        va_t = v_top   >= 0 ? v[i,j] : (j < ny1 ? v[i,j+1] : v[i,j])
+        va_b = v_bot   >= 0 ? (j > 1 ? v[i,j-1] : v[i,j]) : v[i,j]
+        va_r = u_right >= 0 ? v[i,j] : (i < nx  ? v[i+1,j] : v[i,j])
+        va_l = u_left  >= 0 ? (i > 1 ? v[i-1,j] : v[i,j]) : v[i,j]
+        F[i,j] = (u_right*va_r - u_left*va_l)*idx + (v_top*va_t - v_bot*va_b)*idy
     end
-    return F
 end
 
-function gradp_u(p, dx)
-    nx, ny = size(p)
-    g = zeros(nx+1, ny)
-    for j in 1:ny, i in 2:nx
-        g[i, j] = (p[i, j] - p[i-1, j]) / dx
+function gradp_u!(g, p, dx)
+    nx, ny = size(p); idx = 1/dx
+    @inbounds for j in 1:ny, i in 2:nx
+        g[i,j] = (p[i,j] - p[i-1,j]) * idx
     end
-    return g
 end
 
-function gradp_v(p, dy)
-    nx, ny = size(p)
-    g = zeros(nx, ny+1)
-    for j in 2:ny, i in 1:nx
-        g[i, j] = (p[i, j] - p[i, j-1]) / dy
+function gradp_v!(g, p, dy)
+    nx, ny = size(p); idy = 1/dy
+    @inbounds for j in 2:ny, i in 1:nx
+        g[i,j] = (p[i,j] - p[i,j-1]) * idy
     end
-    return g
 end
 
-function gif_maker(uc, vc, p, xs, ys, dx, dy, n, nt)
-    nx, ny = size(uc)
-    speed  = sqrt.(uc.^2 .+ vc.^2)
+# ── gif_maker : Xg/Yg/xi/yj/step pré-calculés, passés en argument ────────
+function gif_maker(uc, vc, p, xs, ys, dx, dy, n, Xg, Yg, xi, yj, step)
+    speed = sqrt.(uc.^2 .+ vc.^2)
+    sp = @views speed[xi, yj] .+ 1e-10
+    Un = @views uc[xi, yj] ./ sp .* (dx * step * 0.5)
+    Vn = @views vc[xi, yj] ./ sp .* (dy * step * 0.5)
 
-    step = max(1, nx ÷ 20)
-    xi = 1:step:nx
-    yj = 1:step:ny
-    Xg = [xs[i] for i in xi, j in yj]
-    Yg = [ys[j] for i in xi, j in yj]
-    sp = speed[xi, yj] .+ 1e-10
-    Un = uc[xi, yj] ./ sp .* dx .* step .* 0.5
-    Vn = vc[xi, yj] ./ sp .* dy .* step .* 0.5
+    p1 = heatmap(xs, ys, uc'; title="u", xlabel="x", ylabel="y",
+        aspect_ratio=1, color=:RdBu, clims=(-1,1), colorbar=false, dpi=72)
+    p2 = heatmap(xs, ys, vc'; title="v", xlabel="x", ylabel="y",
+        aspect_ratio=1, color=:RdBu, clims=(-1,1), colorbar=false, dpi=72)
+    p3 = heatmap(xs, ys, p';  title="p", xlabel="x", ylabel="y",
+        aspect_ratio=1, color=:viridis, colorbar=false, dpi=72)
+    p4 = heatmap(xs, ys, speed'; color=:plasma, clims=(0,1),
+        aspect_ratio=1, title="‖u‖ t=$n", xlabel="x", ylabel="y",
+        colorbar=false, dpi=72)
+    quiver!(p4, Xg, Yg; quiver=(vec(Un), vec(Vn)),
+        arrow=true, color=:white, linewidth=0.6)
 
-    p1 = heatmap(xs, ys, uc',
-        title="u (vitesse horizontale)", xlabel="x", ylabel="y",
-        aspect_ratio=1, color=:RdBu, clims=(-1, 1))
-
-    p2 = heatmap(xs, ys, vc',
-        title="v (vitesse verticale)", xlabel="x", ylabel="y",
-        aspect_ratio=1, color=:RdBu, clims=(-1, 1))
-
-    p3 = heatmap(xs, ys, p',
-        title="p (pression)", xlabel="x", ylabel="y",
-        aspect_ratio=1, color=:viridis)
-
-    pquiver = heatmap(xs, ys, speed',
-        color=:plasma, clims=(0, 1),
-        aspect_ratio=1,
-        title="‖u‖  —  t=$(n)",
-        xlabel="x", ylabel="y",
-        size=(600, 550))
-
-    return plot(p1, p2, p3, pquiver, layout=(2, 2), size=(1000, 900))
+    plot(p1, p2, p3, p4; layout=(2,2), size=(900,800), dpi=72)
 end
 
+# ── Streamlines RK2 ───────────────────────────────────────────────────────
 function streamlines(uc, vc, xs, ys; nseeds=20, nsteps=2000, ds=4e-4)
     nx, ny   = length(xs), length(ys)
     x1, y1   = xs[1], ys[1]
@@ -222,18 +173,18 @@ function streamlines(uc, vc, xs, ys; nseeds=20, nsteps=2000, ds=4e-4)
             px = Float32[si]; py = Float32[sj]
             x, y = Float64(si), Float64(sj)
             for _ in 1:nsteps
-                u1 = interp2(uc, x, y); v1 = interp2(vc, x, y)
-                sp1 = sqrt(u1^2 + v1^2) + 1e-12
-                x2 = clamp(x + ds*u1/sp1, xmin, xmax)
-                y2 = clamp(y + ds*v1/sp1, ymin, ymax)
-                u2 = interp2(uc, x2, y2); v2 = interp2(vc, x2, y2)
+                u1 = interp2(uc,x,y); v1 = interp2(vc,x,y)
+                sp1 = sqrt(u1^2+v1^2)+1e-12
+                x2 = clamp(x+ds*u1/sp1, xmin, xmax)
+                y2 = clamp(y+ds*v1/sp1, ymin, ymax)
+                u2 = interp2(uc,x2,y2); v2 = interp2(vc,x2,y2)
                 um = (u1+u2)*0.5; vm = (v1+v2)*0.5
-                sp = sqrt(um^2 + vm^2) + 1e-12
-                x = clamp(x + ds*um/sp, xmin, xmax)
-                y = clamp(y + ds*vm/sp, ymin, ymax)
-                push!(px, x); push!(py, y)
+                sp = sqrt(um^2+vm^2)+1e-12
+                x = clamp(x+ds*um/sp, xmin, xmax)
+                y = clamp(y+ds*vm/sp, ymin, ymax)
+                push!(px,x); push!(py,y)
             end
-            push!(lines, (px, py))
+            push!(lines,(px,py))
         end
     end
     return lines
@@ -243,13 +194,11 @@ function plot_streamlines(uc, vc, xs, ys; nseeds=20, clim=nothing)
     speed = sqrt.(uc.^2 .+ vc.^2)
     cmax  = isnothing(clim) ? maximum(speed) : clim
     lines = streamlines(uc, vc, xs, ys; nseeds=nseeds)
-
     plt = heatmap(xs, ys, speed';
         color=:inferno, clims=(0.0, cmax),
         aspect_ratio=1, xlabel="x", ylabel="y",
         title="Lignes de courant  (‖u‖ en fond)",
         size=(600, 560), dpi=100)
-
     for (px, py) in lines
         plot!(plt, px, py; lw=0.8, lc=:white, alpha=0.6, label=false)
     end
