@@ -1,40 +1,5 @@
 using LinearAlgebra, SparseArrays, Plots
 
-function gaussEidel(At::SparseMatrixCSC{T,Int}, b::AbstractVector, x::AbstractVector;
-                    tol=1e-6, maxiter=20_000, ω=1.6) where {T<:Real}
-    rows = rowvals(At); vals = nonzeros(At)
-    n = size(At, 1)
-    @assert size(At,2) == n  "At doit être carrée"
-    @assert length(b)  == n  "b mauvaise taille"
-    @assert length(x)  == n  "x mauvaise taille"
-    @assert 0.0 < ω < 2.0   "ω doit être dans (0,2) pour SOR"
-
-    for k in 1:maxiter
-        δmax = zero(T)
-        for i in 1:n
-            sigma = zero(T)
-            aii   = zero(T)
-            found_diag = false
-            for ptr in nzrange(At, i)
-                j = rows[ptr]; aij = vals[ptr]
-                if j == i
-                    aii = aij; found_diag = true
-                else
-                    sigma += aij * x[j]
-                end
-            end
-            !found_diag || aii == 0 && error("SOR: diagonale nulle/manquante à i=$i")
-            x_new = (1-ω)*x[i] + ω*(b[i] - sigma)/aii
-            δmax  = max(δmax, abs(x_new - x[i]))
-            x[i]  = x_new
-        end
-        δmax < tol && return x, k
-    end
-
-    @warn "Pas de convergence après $maxiter itérations (ω=$ω)"
-    return x, maxiter
-end
-
 function laplacian2D(nx, ny, dx, dy)
     N = nx * ny
     A = spzeros(N, N)
@@ -42,42 +7,78 @@ function laplacian2D(nx, ny, dx, dy)
 
     for j in 1:ny, i in 1:nx
         k = id(i, j)
-        if i == 1 && j == 1
+
+        # if j == 1
+        #     A[k, k] = 1.0
+        #     continue
+        # end
+
+        if j == ny
             A[k, k] = 1.0
             continue
         end
+
         diag = 0.0
-        if i > 1;  A[k, id(i-1,j)] += 1/dx^2; diag -= 1/dx^2; end
-        if i < nx; A[k, id(i+1,j)] += 1/dx^2; diag -= 1/dx^2; end
-        if j > 1;  A[k, id(i,j-1)] += 1/dy^2; diag -= 1/dy^2; end
-        if j < ny; A[k, id(i,j+1)] += 1/dy^2; diag -= 1/dy^2; end
+        if i > 1;  A[k, id(i-1,j)] = 1/dx^2; diag -= 1/dx^2; end
+        if i < nx; A[k, id(i+1,j)] = 1/dx^2; diag -= 1/dx^2; end
+        if j > 1;  A[k, id(i,j-1)] = 1/dy^2; diag -= 1/dy^2; end
+        if j < ny; A[k, id(i,j+1)] = 1/dy^2; diag -= 1/dy^2; end
         A[k, k] = diag
     end
     return A
 end
 
-function condition_bord!(u, v, U0=5.0)
-    u[1,:]   .= 0.0; u[end,:] .= 0.0
-    u[:,1]   .= U0;  u[:,end] .= 0.0
-    v[:,1]   .= 0.0; v[:,end] .= 0.0
-    v[1,:]   .= 0.0; v[end,:] .= 0.0
+# function condition_bord!(u, v, U0=5.0)
+#     u[1,:]   .= 0.0; u[end,:] .= 0.0
+#     u[:,1]   .= U0;  u[:,end] .= 0.0
+#     v[:,1]   .= 0.0; v[:,end] .= 0.0
+#     v[1,:]   .= 0.0; v[end,:] .= 0.0
+# end
+
+function apply_bc!(u, v, p, nx, ny, j_slot_start, j_slot_end, V_jet)
+
+    # Bord gauche 
+    # u[1, :] .= u[2,:]
+    # v[1, :] .= v[2,:]
+    u[1, :] .= 0
+    v[1, :] .= 0
+
+    # Bord droit 
+    # u[end, :] .= u[end-1,:]
+    # v[end, :] .= v[end-1,:]
+    u[end, :] .= 0
+    v[end, :] .= 0
+
+    # Bord bas 
+    u[:, 1] .= 0.0
+    v[:, 1] .= 0.0
+    v[j_slot_start:j_slot_end, 1] .= V_jet
+
+    # u[61:64 ,1] .= u[61:64 ,2]
+    # v[61:64 ,1] .= 0
+    
+    # Bord haut 
+    # u[:, end] .= 0
+    # v[:, end] .= 0
+    u[:,end] .= u[:,end-1]
+    v[:,end] .= v[:,end-1]
 end
 
 @inline function divergence(u, v, i, j, dx, dy)
     (u[i+1, j] - u[i, j]) / dx + (v[i, j+1] - v[i, j]) / dy
 end
 
-# ── Versions in-place (zéro allocation) ──────────────────────────────────
-
 function flux_diff!(F, nu, phi, dx, dy)
     nx, ny = size(phi)
     idx2 = 1/dx^2; idy2 = 1/dy^2
+
     @inbounds for j in 2:ny-1, i in 2:nx-1
         F[i,j] = nu * (
             (phi[i+1,j] - 2phi[i,j] + phi[i-1,j]) * idx2 +
             (phi[i,j+1] - 2phi[i,j] + phi[i,j-1]) * idy2
         )
     end
+
 end
 
 function flux_conv_u!(F, u, v, dx, dy)
@@ -86,9 +87,12 @@ function flux_conv_u!(F, u, v, dx, dy)
     @inbounds for j in 2:ny-1, i in 2:nx1-1
         u_right = i < nx1 ? (u[i,j] + u[i+1,j]) * 0.5 : 0.0
         u_left  = i > 1   ? (u[i-1,j] + u[i,j]) * 0.5 : 0.0
+
         il = max(i-1,1); ir = min(i,nx1-1)
+
         v_top = (v[il,j+1] + v[ir,j+1]) * 0.5
         v_bot = (v[il,j]   + v[ir,j])   * 0.5
+
         ua_r = u_right >= 0 ? u[i,j] : (i < nx1 ? u[i+1,j] : u[i,j])
         ua_l = u_left  >= 0 ? (i > 1 ? u[i-1,j] : u[i,j]) : u[i,j]
         ua_t = v_top   >= 0 ? u[i,j] : (j < ny  ? u[i,j+1] : u[i,j])
@@ -100,18 +104,68 @@ end
 function flux_conv_v!(F, u, v, dx, dy)
     nx, ny1 = size(v)
     idx = 1/dx; idy = 1/dy
+
     @inbounds for j in 2:ny1-1, i in 2:nx-1
+
         v_top = j < ny1 ? (v[i,j] + v[i,j+1]) * 0.5 : 0.0
         v_bot = j > 1   ? (v[i,j-1] + v[i,j]) * 0.5 : 0.0
+
         jb = max(j-1,1); jt = min(j,ny1-1)
         u_right = (u[i+1,jb] + u[i+1,jt]) * 0.5
         u_left  = (u[i,  jb] + u[i,  jt]) * 0.5
+
         va_t = v_top   >= 0 ? v[i,j] : (j < ny1 ? v[i,j+1] : v[i,j])
         va_b = v_bot   >= 0 ? (j > 1 ? v[i,j-1] : v[i,j]) : v[i,j]
         va_r = u_right >= 0 ? v[i,j] : (i < nx  ? v[i+1,j] : v[i,j])
         va_l = u_left  >= 0 ? (i > 1 ? v[i-1,j] : v[i,j]) : v[i,j]
+
         F[i,j] = (u_right*va_r - u_left*va_l)*idx + (v_top*va_t - v_bot*va_b)*idy
     end
+end
+
+#### TEMP2RATURE 
+
+function flux_diff_T!(F, alpha, T, dx, dy)
+    nx, ny = size(T)
+    idx2 = 1/dx^2; idy2 = 1/dy^2
+    @inbounds for j in 2:ny-1, i in 2:nx-1
+        F[i,j] = alpha * (
+            (T[i+1,j] - 2T[i,j] + T[i-1,j]) * idx2 +
+            (T[i,j+1] - 2T[i,j] + T[i,j-1]) * idy2)
+    end
+end
+
+function flux_conv_T!(F, uc, vc, T, dx, dy)
+    nx, ny = size(T)
+    idx = 1/dx; idy = 1/dy
+    @inbounds for j in 2:ny-1, i in 2:nx-1
+
+        u_r = (uc[i,j] + uc[min(i+1,nx),j]) * 0.5
+        u_l = (uc[max(i-1,1),j] + uc[i,j]) * 0.5
+        v_t = (vc[i,j] + vc[i,min(j+1,ny)]) * 0.5
+        v_b = (vc[i,max(j-1,1)] + vc[i,j]) * 0.5
+
+
+        Ta_r = u_r >= 0 ? T[i,j] : T[min(i+1,nx),j]
+        Ta_l = u_l >= 0 ? T[max(i-1,1),j] : T[i,j]
+        Ta_t = v_t >= 0 ? T[i,j] : T[i,min(j+1,ny)]
+        Ta_b = v_b >= 0 ? T[i,max(j-1,1)] : T[i,j]
+
+        F[i,j] = (u_r*Ta_r - u_l*Ta_l)*idx + (v_t*Ta_t - v_b*Ta_b)*idy
+    end
+end
+
+function apply_bc_T!(T, nx, ny, T_jet, i_jet_start, i_jet_end)
+
+    T[1,   :] .= T[2,   :]
+    T[end, :] .= T[end-1, :]
+    T[:, end] .= T[:, end-1]
+
+    # T[4:14, 5:15] .= 32
+
+    T[:, 1] .= T[:, 2]
+    T[i_jet_start:i_jet_end, 1] .= T_jet
+
 end
 
 function gradp_u!(g, p, dx)
@@ -128,24 +182,25 @@ function gradp_v!(g, p, dy)
     end
 end
 
-# ── gif_maker : Xg/Yg/xi/yj/step pré-calculés, passés en argument ────────
-function gif_maker(uc, vc, p, xs, ys, dx, dy, n, Xg, Yg, xi, yj, step)
-    speed = sqrt.(uc.^2 .+ vc.^2)
-    sp = @views speed[xi, yj] .+ 1e-10
-    Un = @views uc[xi, yj] ./ sp .* (dx * step * 0.5)
-    Vn = @views vc[xi, yj] ./ sp .* (dy * step * 0.5)
+function gif_maker(uc, vc, p, T, T_ref, T_jet, xs, ys, dx, dy, n, Xg, Yg, xi, yj, step)
+    speed  = sqrt.(uc.^2 .+ vc.^2)
+    sp     = @views speed[xi,yj] .+ 1e-10
+    Un     = @views uc[xi,yj] ./ sp .* (dx*step*0.5)
+    Vn     = @views vc[xi,yj] ./ sp .* (dy*step*0.5)
+    u_lim  = max(maximum(abs,uc), 1e-6)
+    v_lim  = max(maximum(abs,vc), 1e-6)
+    sp_lim = (0.0, max(maximum(speed), 1e-6))
+    T_lim  = (0, 100)
 
-    p1 = heatmap(xs, ys, uc'; title="u", xlabel="x", ylabel="y",
-        aspect_ratio=1, color=:RdBu, clims=(-1,1), colorbar=false, dpi=72)
-    p2 = heatmap(xs, ys, vc'; title="v", xlabel="x", ylabel="y",
-        aspect_ratio=1, color=:RdBu, clims=(-1,1), colorbar=false, dpi=72)
-    p3 = heatmap(xs, ys, p';  title="p", xlabel="x", ylabel="y",
-        aspect_ratio=1, color=:viridis, colorbar=false, dpi=72)
-    p4 = heatmap(xs, ys, speed'; color=:plasma, clims=(0,1),
-        aspect_ratio=1, title="‖u‖ t=$n", xlabel="x", ylabel="y",
-        colorbar=false, dpi=72)
-    quiver!(p4, Xg, Yg; quiver=(vec(Un), vec(Vn)),
-        arrow=true, color=:white, linewidth=0.6)
+    p1 = heatmap(xs, ys, uc'; title="u", color=:RdBu,
+                 clims=(-u_lim,u_lim), aspect_ratio=1, colorbar=false, dpi=72)
+    p2 = heatmap(xs, ys, vc'; title="v", color=:RdBu,
+                 clims=(-v_lim,v_lim), aspect_ratio=1, colorbar=false, dpi=72)
+    p3 = heatmap(xs, ys, speed'; title="‖u‖ t=$n", color=:plasma,
+                 clims=sp_lim, aspect_ratio=1, colorbar=false, dpi=72)
+    quiver!(p3, Xg, Yg; quiver=(vec(Un),vec(Vn)), color=:white, linewidth=0.6)
+    p4 = heatmap(xs, ys, T'; title="T (°C)", color=:hot,
+                 clims=T_lim, aspect_ratio=1, colorbar=true, dpi=72)
 
     plot(p1, p2, p3, p4; layout=(2,2), size=(900,800), dpi=72)
 end

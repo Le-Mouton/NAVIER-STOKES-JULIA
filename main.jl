@@ -2,46 +2,46 @@ using LinearAlgebra, SparseArrays, Plots
 include("func.jl")
 
 function main()
-    nx, ny = 256, 256
-    Lx, Ly = 1.0, 1.0
+    nx, ny = 128, 128
+    Lx, Ly = 2.0, 1.0
     dx, dy  = Lx / nx, Ly / ny
-    U0      = 10.0
+    U0      = 0.5
     rho     = 1.2
-    Re      = 10000.0
+    Re      = 1000.0
     nu      = U0 * Lx / Re
     dt_diff = 0.25 * min(dx, dy)^2 / nu
     dt_conv = 0.5  * min(dx, dy) / U0
     dt      = min(dt_diff, dt_conv)
-    T_final = 10.0
+    T_final = 50.0
     nt      = ceil(Int, T_final / dt)
-    n_frames   = 60
+    n_frames   = 60 
     frame_step = max(1, nt ÷ n_frames)
+
+    slot_width = 1
+    j_slot_start = nx÷2 - slot_width
+    j_slot_end   = nx÷2 + slot_width
+    V_jet        = U0
+
+    T_ref   = 70.0          # température ambiante (°C)
+    T_jet   = 10.0          # température du jet (°C)
+    alpha   = 1e-5          # diffusivité thermique (m²/s), ~air chaud
+    beta    = 3e-3           # coefficient de dilatation (1/K), ~air
+    g       = 9.81           # gravité (m/s²)
 
     println("Re=$(Re),  nu=$(round(nu,sigdigits=3))")
     println("dt=$(round(dt,sigdigits=3)),  nt=$nt,  frame tous les $frame_step pas")
 
-    # ── Champs ────────────────────────────────────────────────────────────
     u = zeros(nx+1, ny)
     v = zeros(nx,   ny+1)
     p = zeros(nx,   ny)
 
-    # ── Matrice Poisson ───────────────────────────────────────────────────
     A_p  = laplacian2D(nx, ny, dx, dy)
     Afix = SparseMatrixCSC(copy(A_p))
-    Afix[1, :] .= 0.0
-    Afix[1, 1]  = 1.0
-    dropzeros!(Afix)
-    At_cached = SparseMatrixCSC(transpose(Afix))   # pré-calculé UNE SEULE FOIS
+    A_fact = factorize(Afix)
 
     xs = ((1:nx) .- 0.5) .* dx
     ys = ((1:ny) .- 0.5) .* dy
 
-    ω_opt = let rho_J = (cos(π/nx) + cos(π/ny)) / 2
-        2 / (1 + sqrt(1 - rho_J^2))
-    end
-    println("ω optimal = $(round(ω_opt, sigdigits=5))")
-
-    # ── Buffers pré-alloués — JAMAIS réaffectés dans la boucle ───────────
     Du     = zeros(nx+1, ny)
     Dv     = zeros(nx,   ny+1)
     Cu     = zeros(nx+1, ny)
@@ -54,59 +54,89 @@ function main()
     pvec   = zeros(nx*ny)
     uc     = zeros(nx,   ny)
     vc     = zeros(nx,   ny)
+    T      = fill(T_ref, nx, ny)
+    DT     = zeros(nx, ny)
+    CT     = zeros(nx, ny)
+    T_star = zeros(nx, ny)
 
     tol_poisson = max(1e-4, 1e-3 * nu)
 
-    # Pré-calcul quiver (constant)
     step = max(1, nx ÷ 20)
     xi   = 1:step:nx
     yj   = 1:step:ny
     Xg   = vec([xs[i] for i in xi, j in yj])
     Yg   = vec([ys[j] for i in xi, j in yj])
 
-    # ── Boucle principale ─────────────────────────────────────────────────
     anim = @animate for n in 1:nt
-        n % 100 == 0 && print("\rÉtape $n / $nt")
+        n % 10 == 0 && print("\rÉtape $n / $nt")
 
-        condition_bord!(u, v, U0)
+        apply_bc!(u, v, p, nx, ny, j_slot_start, j_slot_end, V_jet)
 
-        # Diffusion et convection IN-PLACE → zéro allocation
         flux_diff!(Du, nu, u, dx, dy)
         flux_diff!(Dv, nu, v, dx, dy)
         flux_conv_u!(Cu, u, v, dx, dy)
         flux_conv_v!(Cv, u, v, dx, dy)
 
-        # Vitesse intermédiaire IN-PLACE
         @. u_star = u + dt*(Du - Cu)
         @. v_star = v + dt*(Dv - Cv)
-        condition_bord!(u_star, v_star, U0)
 
-        # RHS Poisson IN-PLACE
+        @inbounds for j in 2:ny-1, i in 2:nx-1
+            T_face = 0.5*(T[i,j] + T[i, max(j-1,1)])
+            v_star[i,j] += dt * g * beta * (T_face - T_ref)
+        end
+
         fill!(bvec, 0.0)
         @inbounds for j in 1:ny, i in 1:nx
             bvec[(j-1)*nx+i] = (rho/dt) * divergence(u_star, v_star, i, j, dx, dy)
         end
-        bvec[1] = 0.0
+        bvec[1] = 0.0 
+    
+        # # Bord gauche   (i=1,  j=1..ny) → k = (j-1)*nx + 1
+        # for j in 1:ny
+        #     bvec[(j-1)*nx + 1] = 0.0
+        # end
 
-        # SOR avec warm-start IN-PLACE
-        pvec .= vec(p)
-        gaussEidel(At_cached, bvec, pvec; tol=tol_poisson, maxiter=5_000, ω=ω_opt)
+        # # Bord droit    (i=nx, j=1..ny) → k = (j-1)*nx + nx
+        # for j in 1:ny
+        #     bvec[(j-1)*nx + nx] = 0.0
+        # end
+
+        # # Bord haut
+        # for i in 1:nx
+        #     bvec[(ny-1)*nx + i] = 0.0           # bord haut p=0
+        # end
+
+        # Bord bas
+        # for i in (nx-5):nx
+        #     bvec[(i-1)*nx + 1] = 0.0           # bord haut p=0
+        # end
+
+        for i in 61:64
+            bvec[i] = 0.0
+        end
+
+        pvec .= A_fact \ bvec
+
         p .= reshape(pvec, nx, ny)
 
-        # Correction vitesse IN-PLACE
         gradp_u!(gu, p, dx)
         gradp_v!(gv, p, dy)
         @. u = u_star - (dt/rho)*gu
         @. v = v_star - (dt/rho)*gv
-        condition_bord!(u, v, U0)
+        apply_bc!(u, v, p, nx, ny, j_slot_start, j_slot_end, V_jet)
+        #condition_bord!(u, v, U0)
 
-        # Centrage IN-PLACE
         @inbounds for j in 1:ny, i in 1:nx
             uc[i,j] = 0.5*(u[i,j] + u[i+1,j])
             vc[i,j] = 0.5*(v[i,j] + v[i,j+1])
         end
 
-        gif_maker(uc, vc, p, xs, ys, dx, dy, n, Xg, Yg, xi, yj, step)
+        apply_bc_T!(T, nx, ny, T_jet, j_slot_start, j_slot_end)
+        flux_diff_T!(DT, alpha, T, dx, dy)
+        flux_conv_T!(CT, uc, vc, T, dx, dy)
+        @. T = T + dt*(DT - CT)
+
+        gif_maker(uc, vc, p, T, T_ref, T_jet, xs, ys, dx, dy, n, Xg, Yg, xi, yj, step)
 
     end every frame_step
 
@@ -114,7 +144,6 @@ function main()
     gif(anim, "navier_stokes.gif", fps=15)
     println("GIF sauvegardé : navier_stokes.gif")
 
-    # ── Streamlines finales ───────────────────────────────────────────────
     @inbounds for j in 1:ny, i in 1:nx
         uc[i,j] = 0.5*(u[i,j] + u[i+1,j])
         vc[i,j] = 0.5*(v[i,j] + v[i,j+1])
