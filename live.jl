@@ -3,14 +3,14 @@ include("func.jl")
 
 function main_live()
     nx, ny = 256, 256
-    Lx, Ly = 1.0, 3.0
+    Lx, Ly = 2.0, 4.0
     dx, dy  = Lx / nx, Ly / ny
-    U0      = 0.1
+    U0      = 0.0001
     rho     = 1.2
     Re      = 1000.0
     nu      = U0 * Lx / Re
     T_ref  = 10.0
-    T_jet  = 70.0
+    T_jet  = 37.0
     alpha  = 1e-5
     beta   = 3e-3
     g      = 9.81
@@ -29,7 +29,6 @@ function main_live()
     println("Re=$(Re),  nu=$(round(nu, sigdigits=3)),  dt=$(round(dt, sigdigits=3))")
     println("Appuyez sur Échap dans la fenêtre pour arrêter.")
 
-    # ── Champs ────────────────────────────────────────────────────────────────
     u      = zeros(nx+1, ny)
     v      = zeros(nx,   ny+1)
     p      = zeros(nx,   ny)
@@ -48,36 +47,30 @@ function main_live()
     bvec   = zeros(nx*ny);      pvec   = zeros(nx*ny)
     uc     = zeros(nx,   ny);   vc     = zeros(nx,   ny)
     DT     = zeros(nx,   ny);   CT     = zeros(nx,   ny)
+    omega  = zeros(nx,   ny)
 
-    # ── Observables ───────────────────────────────────────────────────────────
-    obs_uc    = GLMakie.Observable(zeros(Float32, nx, ny))
-    obs_vc    = GLMakie.Observable(zeros(Float32, nx, ny))
     obs_speed = GLMakie.Observable(zeros(Float32, nx, ny))
     obs_T     = GLMakie.Observable(fill(Float32(T_ref), nx, ny))
+    obs_omega = GLMakie.Observable(zeros(Float32, nx, ny))
     obs_step  = GLMakie.Observable(0)
 
-    # ── Figure ────────────────────────────────────────────────────────────────
-    fig = GLMakie.Figure(size=(1200, 700))
+    fig = GLMakie.Figure(size=(1350, 560))
 
-    ax1 = GLMakie.Axis(fig[1,1], title="u",       aspect=GLMakie.DataAspect(), xlabel="x", ylabel="y")
-    ax2 = GLMakie.Axis(fig[1,2], title="v",       aspect=GLMakie.DataAspect(), xlabel="x")
-    ax3 = GLMakie.Axis(fig[1,3], title=GLMakie.@lift("‖u‖  n=$($obs_step)"),
-                                               aspect=GLMakie.DataAspect(), xlabel="x")
-    ax4 = GLMakie.Axis(fig[1,4], title="T (°C)",  aspect=GLMakie.DataAspect(), xlabel="x")
+    ax1 = GLMakie.Axis(fig[1,1], title=GLMakie.@lift("‖u‖  n=$($obs_step)"),
+                                               aspect=GLMakie.DataAspect(), xlabel="x", ylabel="y")
+    ax2 = GLMakie.Axis(fig[1,2], title="T (°C)",        aspect=GLMakie.DataAspect(), xlabel="x")
+    ax3 = GLMakie.Axis(fig[1,3], title="ω (vorticité)", aspect=GLMakie.DataAspect(), xlabel="x")
 
-    hm1 = GLMakie.heatmap!(ax1, xs, ys, obs_uc;    colormap=:RdBu,  colorrange=(-2, 2))
-    hm2 = GLMakie.heatmap!(ax2, xs, ys, obs_vc;    colormap=:RdBu,  colorrange=(-2, 2))
-    hm3 = GLMakie.heatmap!(ax3, xs, ys, obs_speed; colormap=:plasma, colorrange=(0.0, 4))
-    hm4 = GLMakie.heatmap!(ax4, xs, ys, obs_T;     colormap=:hot,   colorrange=(0, 100))
+    hm1 = GLMakie.heatmap!(ax1, xs, ys, obs_speed; colormap=:plasma, colorrange=(0.0, 1))
+    hm2 = GLMakie.heatmap!(ax2, xs, ys, obs_T;     colormap=:hot,   colorrange=(0, 100))
+    hm3 = GLMakie.heatmap!(ax3, xs, ys, obs_omega;  colormap=:RdBu,  colorrange=(-15, 15))
 
     GLMakie.Colorbar(fig[2,1], hm1, vertical=false, tellwidth=false)
     GLMakie.Colorbar(fig[2,2], hm2, vertical=false, tellwidth=false)
     GLMakie.Colorbar(fig[2,3], hm3, vertical=false, tellwidth=false)
-    GLMakie.Colorbar(fig[2,4], hm4, vertical=false, tellwidth=false)
 
     display(fig)
 
-    # ── Gestion Échap ─────────────────────────────────────────────────────────
     running = Ref(true)
     GLMakie.on(GLMakie.events(fig).keyboardbutton) do event
         if event.action == GLMakie.Keyboard.press && event.key == GLMakie.Keyboard.escape
@@ -85,7 +78,6 @@ function main_live()
         end
     end
 
-    # ── Boucle principale ─────────────────────────────────────────────────────
     n = 0
     while running[] && isopen(fig.scene)
         n += 1
@@ -104,21 +96,24 @@ function main_live()
         @. u_star = u + dt*(Du - Cu)
         @. v_star = v + dt*(Dv - Cv)
 
-        @inbounds for j in 2:ny-1, i in 2:nx-1
-            T_face = 0.5*(T[i,j] + T[i, max(j-1,1)])
-            v_star[i,j] += dt * g * beta * (T_face - T_ref)
+        @inbounds for j in 2:ny-1
+            @inbounds for i in 2:nx-1
+                T_face = 0.5*(T[i,j] + T[i, max(j-1,1)])
+                v_star[i,j] += dt * g * beta * (T_face - T_ref)
+            end
         end
 
         apply_bc!(u_star, v_star, p, nx, ny, j_slot_start, j_slot_end, V_jet)
 
         fill!(bvec, 0.0)
-        @inbounds for j in 1:ny, i in 1:nx
-            bvec[(j-1)*nx+i] = (rho/dt) * divergence(u_star, v_star, i, j, dx, dy)
+        @inbounds for j in 1:ny
+            @inbounds for i in 1:nx
+                bvec[(j-1)*nx+i] = (rho/dt) * divergence(u_star, v_star, i, j, dx, dy)
+            end
         end
         bvec[1] = 0.0
-
         for i in 1:nx
-            bvec[(ny-1)*nx + i] = 0.0   # bord haut p=0
+            bvec[i] = 0.0
         end
 
         pvec .= A_fact \ bvec
@@ -129,10 +124,14 @@ function main_live()
         @. u = u_star - (dt/rho)*gu
         @. v = v_star - (dt/rho)*gv
 
-        @inbounds for j in 1:ny, i in 1:nx
-            uc[i,j] = 0.5*(u[i,j] + u[i+1,j])
-            vc[i,j] = 0.5*(v[i,j] + v[i,j+1])
+        @inbounds for j in 1:ny
+            @inbounds for i in 1:nx
+                uc[i,j] = 0.5*(u[i,j] + u[i+1,j])
+                vc[i,j] = 0.5*(v[i,j] + v[i,j+1])
+            end
         end
+
+        compute_vorticity!(omega, uc, vc, dx, dy)
 
         apply_bc_T!(T, nx, ny, T_jet, j_slot_start, j_slot_end)
         flux_diff_T!(DT, alpha, T, dx, dy)
@@ -145,10 +144,9 @@ function main_live()
         end
 
         if n % 20 == 0
-            obs_uc[]    = Float32.(uc)
-            obs_vc[]    = Float32.(vc)
             obs_speed[] = Float32.(sqrt.(uc.^2 .+ vc.^2))
             obs_T[]     = Float32.(T)
+            obs_omega[] = Float32.(omega)
             obs_step[]  = n
             sleep(0.0001)
         end
